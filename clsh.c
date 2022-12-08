@@ -140,6 +140,7 @@ int main(int argc, char *argv[]) {
     // try CLSH_HOSTS
     if (host_count < 1) {
         if ((env = getenv("CLSH_HOSTS")) != NULL) {
+            printf("Note: use CLSH_HOSTS environment\n");
             get_host_from_string(env, ":");
         }
     }
@@ -147,12 +148,14 @@ int main(int argc, char *argv[]) {
     // try CLSH_HOSTFILE
     if (host_count < 1) {
         if ((env = getenv("CLSH_HOSTFILE")) != NULL) {
+            printf("Note: use `%s` from CLSH_FILEHOST environment", env);
             get_host_from_file(env, "\n");
         }
     }
 
     // try .hostfile
     if (host_count < 1) {
+        printf("Note: use .hostfile");
         get_host_from_file(".hostfile", "\n");
     }
 
@@ -174,11 +177,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    // get remote command
-    command = argv[optind];
-    printf("CLSH: {%s}\n", command);
-
-    // make many ssh child
+    // remote exec with ssh
     struct pollfd hostpfds[3][MAX_HOST];
     for (int i = 0; i < host_count; i++) {
         hostpid[i] = ssh_proc_open(
@@ -190,23 +189,24 @@ int main(int argc, char *argv[]) {
         );
     }
 
-    // enroll poll
+    // set event flags
     for (int i = 0; i < host_count; i++) {
         hostpfds[STDOUT_FILENO][i].events = POLLIN;
         hostpfds[STDERR_FILENO][i].events = POLLIN;
     }
 
-    // master stdin
+    // master stdin (option 4)
     struct pollfd command_fd;
     command_fd.fd = STDIN_FILENO;
     command_fd.events = POLLIN;
 
     int alive = host_count;
     while (alive > 0) {
-        // get only stdout and stderr
+
+        // poll stdout and stderr
         for (int std_fd_no = 1; std_fd_no < 3; std_fd_no++) {
             if (poll(hostpfds[std_fd_no], (nfds_t) host_count, -1) < 0) {
-                fprintf(stderr, "Couldn't poll host stdout\n");
+                fprintf(stderr, "Couldn't poll host stdout or stderr.\n");
                 exit(EXIT_FAILURE);
             }
 
