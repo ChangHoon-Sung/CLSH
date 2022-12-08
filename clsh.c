@@ -17,12 +17,12 @@
 
 extern int optind;
 
-char *host[MAX_HOST], *hostfile, *ptr;
+char *host[MAX_HOST];
 pid_t hostpid[MAX_HOST];
 
 int host_count;
 
-pid_t ssh_proc_open(char *host, char *command, int *to, int *from, int *err) {
+pid_t ssh_proc_open(char *hostname, char *command, int *to, int *from, int *err) {
     int to_pipe[2], from_pipe[2], err_pipe[2];
     pid_t pid;
 
@@ -55,7 +55,7 @@ pid_t ssh_proc_open(char *host, char *command, int *to, int *from, int *err) {
         dup2(from_pipe[WR], STDOUT_FILENO);
         dup2(err_pipe[WR], STDERR_FILENO);
 
-        execlp("ssh", "ssh", host, command, (char *) 0);
+        execlp("ssh", "ssh", hostname, command, (char *) 0);
 
         // Shouldn't be reached
         exit(EXIT_FAILURE);
@@ -72,8 +72,45 @@ pid_t ssh_proc_open(char *host, char *command, int *to, int *from, int *err) {
     return pid;
 }
 
+void get_host_from_file(const char *path, const char *sep) {
+    char *ptr;
+    int fd = open(path, O_RDONLY);
+    if (fd == -1) {
+        perror("open hostfile");
+        exit(EXIT_FAILURE);
+    }
+
+    char buf[BUFSIZ];
+    ssize_t n;
+    while ((n = read(fd, buf, BUFSIZ)) > 0) {
+        buf[n] = '\0';
+        ptr = strtok(buf, sep);
+        while (ptr != NULL) {
+            if (host_count > MAX_HOST) {
+                fprintf(stderr, "Too many hosts");
+                exit(EXIT_FAILURE);
+            }
+            host[host_count++] = ptr;
+            ptr = strtok(NULL, sep);
+        }
+    }
+    close(fd);
+}
+
+void get_host_from_string(const char *s, const char *sep) {
+    char *ptr = strtok(s, sep);
+    while (ptr) {
+        if (host_count > MAX_HOST) {
+            fprintf(stderr, "Too many hosts");
+            exit(EXIT_FAILURE);
+        }
+        host[host_count++] = ptr;
+        ptr = strtok(NULL, sep);
+    }
+}
+
 int main(int argc, char *argv[]) {
-    char *command;
+    char *command, *env;
     int c;
 
     // get hostname from args
@@ -89,114 +126,43 @@ int main(int argc, char *argv[]) {
 
         switch (c) {
             case 'f':
-                hostfile = optarg;
-                int fd = open(hostfile, O_RDONLY);
-                if (fd == -1) {
-                    perror("open hostfile");
-                    exit(EXIT_FAILURE);
-                }
-
-                char buf[BUFSIZ];
-                ssize_t n;
-                while ((n = read(fd, buf, BUFSIZ)) > 0) {
-                    buf[n] = '\0';
-                    ptr = strtok(buf, "\n");
-                    while (ptr != NULL) {
-                        if (host_count > MAX_HOST) {
-                            fprintf(stderr, "Too many hosts");
-                            exit(EXIT_FAILURE);
-                        }
-                        host[host_count++] = ptr;
-                        ptr = strtok(NULL, "\n");
-                    }
-                }
+                get_host_from_file(optarg, "\n");
                 break;
             case 'h':
-                ptr = strtok(optarg, " ,");
-                while (ptr) {
-                    if (host_count > MAX_HOST) {
-                        fprintf(stderr, "Too many hosts");
-                        exit(EXIT_FAILURE);
-                    }
-                    host[host_count++] = ptr;
-                    ptr = strtok(NULL, " ,");
-                }
+                get_host_from_string(optarg, " ,");
                 break;
             default:    // '?' invalid option
                 exit(EXIT_FAILURE);
         }
     }
 
-    char *env;
 
     // try CLSH_HOSTS
     if (host_count < 1) {
         if ((env = getenv("CLSH_HOSTS")) != NULL) {
-            ptr = strtok(env, ":");
-            while (ptr != NULL) {
-                if (host_count > MAX_HOST) {
-                    fprintf(stderr, "Too many hosts");
-                    exit(EXIT_FAILURE);
-                }
-                host[host_count++] = ptr;
-                ptr = strtok(NULL, "\n");
-            }
+            get_host_from_string(env, ":");
         }
     }
 
     // try CLSH_HOSTFILE
     if (host_count < 1) {
         if ((env = getenv("CLSH_HOSTFILE")) != NULL) {
-            int fd = open(env, O_RDONLY);
-            if (fd == -1) {
-                perror("open hostfile");
-                exit(EXIT_FAILURE);
-            }
-
-            char buf[BUFSIZ];
-            ssize_t n;
-            while ((n = read(fd, buf, BUFSIZ)) > 0) {
-                buf[n] = '\0';
-                ptr = strtok(buf, "\n");
-                while (ptr != NULL) {
-                    if (host_count > MAX_HOST) {
-                        fprintf(stderr, "Too many hosts");
-                        exit(EXIT_FAILURE);
-                    }
-                    host[host_count++] = ptr;
-                    ptr = strtok(NULL, "\n");
-                }
-            }
+            get_host_from_file(env, "\n");
         }
     }
 
     // try .hostfile
     if (host_count < 1) {
-        int fd = open("./.hostfile", O_RDONLY);
-        if (fd == -1) {
-            perror("open .hostfile");
-            exit(EXIT_FAILURE);
-        }
-
-        char buf[BUFSIZ];
-        ssize_t n;
-        while ((n = read(fd, buf, BUFSIZ)) > 0) {
-            buf[n] = '\0';
-            ptr = strtok(buf, "\n");
-            while (ptr != NULL) {
-                if (host_count > MAX_HOST) {
-                    fprintf(stderr, "Too many hosts");
-                    exit(EXIT_FAILURE);
-                }
-                host[host_count++] = ptr;
-                ptr = strtok(NULL, "\n");
-            }
-        }
+        get_host_from_file(".hostfile", "\n");
     }
 
+    // get command
+    command = argv[optind];
 
+    // assertion
     assert(host_count > 0);
     assert(host[0] != NULL);
+    assert(command != NULL);
 
     // handling child termination with sigaction
     struct sigaction sa;
