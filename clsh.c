@@ -72,7 +72,7 @@ pid_t ssh_proc_open(char *hostname, char *command, int *to, int *from, int *err)
     return pid;
 }
 
-void get_host_from_file(const char *path, const char *sep) {
+void get_host_from_file(char *path, const char *sep) {
     char *ptr;
     int fd = open(path, O_RDONLY);
     if (fd == -1) {
@@ -97,7 +97,7 @@ void get_host_from_file(const char *path, const char *sep) {
     close(fd);
 }
 
-void get_host_from_string(const char *s, const char *sep) {
+void get_host_from_string(char *s, const char *sep) {
     char *ptr = strtok(s, sep);
     while (ptr) {
         if (host_count > MAX_HOST) {
