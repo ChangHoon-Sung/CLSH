@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <string.h>
 #include <assert.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 
@@ -109,18 +110,40 @@ void get_host_from_string(char *s, const char *sep) {
     }
 }
 
+void open_output_redirection(const int STD_FD, int out_redirection_fd[][MAX_HOST], char *out_redirection_path[],
+                             const char *ext) {
+    char buf[PATH_MAX];
+    snprintf(buf, PATH_MAX, "mkdir -p %s", out_redirection_path[STD_FD]);
+    if (system(buf) != 0) {
+        perror("mkdir");
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < host_count; i++) {
+        snprintf(buf, PATH_MAX, "%s/%s.%s", out_redirection_path[STD_FD], host[i], ext);
+        if ((out_redirection_fd[STD_FD][i] = open(buf, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1) {
+            perror("open output redirections");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
 int main(int argc, char *argv[]) {
-    char *command, *env;
+    char command[PIPE_BUFSIZ];
+    char *opt_redirection_path[3] = {};
+    int out_redirection_fd[3][MAX_HOST] = {};
+    char *env;
     int c;
 
     // get hostname from args
     while (1) {
         int option_index = 0;
         static struct option long_options[] = {
-                {"hostfile", required_argument, NULL, 'f'}
+                {"hostfile", required_argument, NULL, 'f'},
+                {"out",      required_argument, NULL, 'o'},
+                {"err",      required_argument, NULL, 'e'},
         };
 
-        c = getopt_long(argc, argv, "h:f:", long_options, &option_index);
+        c = getopt_long(argc, argv, "h:f:o:e:", long_options, &option_index);
         if (c == -1)
             break;
 
@@ -130,6 +153,12 @@ int main(int argc, char *argv[]) {
                 break;
             case 'h':
                 get_host_from_string(optarg, " ,");
+                break;
+            case 'o':
+                opt_redirection_path[STDOUT_FILENO] = optarg;
+                break;
+            case 'e':
+                opt_redirection_path[STDERR_FILENO] = optarg;
                 break;
             default:    // '?' invalid option
                 exit(EXIT_FAILURE);
@@ -159,13 +188,39 @@ int main(int argc, char *argv[]) {
         get_host_from_file(".hostfile", "\n");
     }
 
-    // get command
-    command = argv[optind];
+    if (host_count < 1) {
+        printf("usage: ./clsh --hostfile <path> <command>\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // make command (shell redirection)
+    if (isatty(STDIN_FILENO)) {
+        strncpy(command, argv[optind], PIPE_BUFSIZ);
+    } else {
+        char buf[PIPE_BUFSIZ];
+        ssize_t n;
+        if ((n = read(STDIN_FILENO, buf, PIPE_BUFSIZ - 1)) < 0) {
+            perror("read stdin");
+            exit(EXIT_FAILURE);
+        }
+        buf[n - 1] = '\0';    // remove last newline
+        snprintf(command, PIPE_BUFSIZ, "echo \"%s\" | %s", buf, argv[optind]);
+    }
 
     // assertion
     assert(host_count > 0);
     assert(host[0] != NULL);
     assert(command != NULL);
+
+    // open output file
+    if (opt_redirection_path[STDOUT_FILENO] != NULL) {
+        open_output_redirection(STDOUT_FILENO, out_redirection_fd, opt_redirection_path, "out");
+    }
+
+    // open error file
+    if (opt_redirection_path[STDERR_FILENO] != NULL) {
+        open_output_redirection(STDERR_FILENO, out_redirection_fd, opt_redirection_path, "err");
+    }
 
     // handling child termination with sigaction
     struct sigaction sa;
@@ -204,20 +259,27 @@ int main(int argc, char *argv[]) {
     while (alive > 0) {
 
         // poll stdout and stderr
-        for (int std_fd_no = 1; std_fd_no < 3; std_fd_no++) {
-            if (poll(hostpfds[std_fd_no], (nfds_t) host_count, -1) < 0) {
+        for (int fd_no = 1; fd_no < 3; fd_no++) {
+            if (poll(hostpfds[fd_no], (nfds_t) host_count, -1) < 0) {
                 fprintf(stderr, "Couldn't poll host stdout or stderr.\n");
                 exit(EXIT_FAILURE);
             }
 
             for (int i = 0; i < host_count; i++) {
-                if (hostpfds[std_fd_no][i].revents & POLLIN) {
+                if (hostpfds[fd_no][i].revents & POLLIN) {
+                    int init_read = 1;
                     char buf[PIPE_BUFSIZ];
                     ssize_t n;
-                    while ((n = read(hostpfds[std_fd_no][i].fd, buf, PIPE_BUFSIZ)) > 0) {
+                    while ((n = read(hostpfds[fd_no][i].fd, buf, PIPE_BUFSIZ)) > 0) {
+                        if (opt_redirection_path[fd_no] == NULL && init_read) {
+                            printf("[%s]\n", host[i]);
+                            init_read = 0;
+                        }
                         buf[n] = '\0';
-                        printf("%s: %s", host[i], buf);
+                        write((opt_redirection_path[fd_no] == NULL ? fd_no : out_redirection_fd[fd_no][i]), buf, n);
                     }
+                    if (opt_redirection_path[fd_no] == NULL && !init_read) printf("\n");
+
                     if (n < 0) {
                         strerror(errno);
                         exit(EXIT_FAILURE);
@@ -225,9 +287,11 @@ int main(int argc, char *argv[]) {
                         // 읽힌게 없으면 출력 없이 프로그램 실행 중이거나 pid가 죽거나 둘 중 하나
                         // pid 생존 체크: kill signo 0
                         if (kill(hostpid[i], 0) < 0) {
-//                            fprintf(stderr, "pid %d doesn't exists anymore.\n", hostpid[i]);
+//                          fprintf(stderr, "pid %d doesn't exists anymore.\n", hostpid[i]);
                             close(hostpfds[STDOUT_FILENO][i].fd);
                             close(hostpfds[STDERR_FILENO][i].fd);
+                            close(out_redirection_fd[STDOUT_FILENO][i]);
+                            close(out_redirection_fd[STDERR_FILENO][i]);
                             alive--;
                         }
 //                        else {
