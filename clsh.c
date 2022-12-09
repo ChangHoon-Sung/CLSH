@@ -267,36 +267,40 @@ int main(int argc, char *argv[]) {
 
             for (int i = 0; i < host_count; i++) {
                 if (hostpfds[fd_no][i].revents & POLLIN) {
-                    int init_read = 1;
+                    int flag = 0;
                     char buf[PIPE_BUFSIZ];
                     ssize_t n;
                     while ((n = read(hostpfds[fd_no][i].fd, buf, PIPE_BUFSIZ)) > 0) {
-                        if (opt_redirection_path[fd_no] == NULL && init_read) {
-                            printf("[%s]\n", host[i]);
-                            init_read = 0;
+                        if (!flag) {
+                            if (opt_redirection_path[fd_no] == NULL) {
+                                printf("[%s]: ", host[i]);
+                            }
+                            flag = 1;
                         }
                         buf[n] = '\0';
                         write((opt_redirection_path[fd_no] == NULL ? fd_no : out_redirection_fd[fd_no][i]), buf, n);
                     }
-                    if (opt_redirection_path[fd_no] == NULL && !init_read) printf("\n");
+                    if (opt_redirection_path[fd_no] == NULL) printf("\n");
 
-                    if (n < 0) {
-                        strerror(errno);
-                        exit(EXIT_FAILURE);
-                    } else if (n == 0) {
-                        // 읽힌게 없으면 출력 없이 프로그램 실행 중이거나 pid가 죽거나 둘 중 하나
-                        // pid 생존 체크: kill signo 0
-                        if (kill(hostpid[i], 0) < 0) {
+                    // poll 진입 후 한 번도 읽지 못 한 경우, 자식 프로세스 상태 확인
+                    if (!flag) {
+                        if (n < 0) {
+                            strerror(errno);
+                            exit(EXIT_FAILURE);
+                        } else if (n == 0) {
+                            // 프로세스 생존 체크: kill signo 0
+                            if (kill(hostpid[i], 0) < 0) {
 //                          fprintf(stderr, "pid %d doesn't exists anymore.\n", hostpid[i]);
-                            close(hostpfds[STDOUT_FILENO][i].fd);
-                            close(hostpfds[STDERR_FILENO][i].fd);
-                            close(out_redirection_fd[STDOUT_FILENO][i]);
-                            close(out_redirection_fd[STDERR_FILENO][i]);
-                            alive--;
-                        }
+                                close(hostpfds[STDOUT_FILENO][i].fd);
+                                close(hostpfds[STDERR_FILENO][i].fd);
+                                close(out_redirection_fd[STDOUT_FILENO][i]);
+                                close(out_redirection_fd[STDERR_FILENO][i]);
+                                alive--;
+                            }
 //                        else {
 //                            fprintf(stderr, "%s's stdout return EOF. (running)\n", host[i]);
 //                        }
+                        }
                     }
                 }
             }
