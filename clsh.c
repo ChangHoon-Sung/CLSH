@@ -18,10 +18,12 @@
 
 extern int optind;
 
-char *host[MAX_HOST];
+char host[MAX_HOST][FILENAME_MAX];
 pid_t hostpid[MAX_HOST];
 
-int host_count;
+int out_redirected = 0, err_redirected = 0;
+
+int host_count, alive;
 
 pid_t ssh_proc_open(char *hostname, char *command, int *to, int *from, int *err) {
     int to_pipe[2], from_pipe[2], err_pipe[2];
@@ -83,7 +85,7 @@ void get_host_from_file(char *path, const char *sep) {
 
     char buf[BUFSIZ];
     ssize_t n;
-    while ((n = read(fd, buf, BUFSIZ)) > 0) {
+    while ((n = read(fd, buf, BUFSIZ - 1)) > 0) {
         buf[n] = '\0';
         ptr = strtok(buf, sep);
         while (ptr != NULL) {
@@ -91,7 +93,7 @@ void get_host_from_file(char *path, const char *sep) {
                 fprintf(stderr, "Too many hosts");
                 exit(EXIT_FAILURE);
             }
-            host[host_count++] = ptr;
+            strncpy(host[host_count++], ptr, FILENAME_MAX);
             ptr = strtok(NULL, sep);
         }
     }
@@ -105,32 +107,74 @@ void get_host_from_string(char *s, const char *sep) {
             fprintf(stderr, "Too many hosts");
             exit(EXIT_FAILURE);
         }
-        host[host_count++] = ptr;
+        strncpy(host[host_count++], ptr, FILENAME_MAX);
         ptr = strtok(NULL, sep);
     }
 }
 
-void open_output_redirection(const int STD_FD, int out_redirection_fd[][MAX_HOST], char *out_redirection_path[],
-                             const char *ext) {
+void open_redirection(const int STD_FD, char redirection_path[][PATH_MAX], int redirection_fd[][MAX_HOST],
+                      const char *ext) {
     char buf[PATH_MAX];
-    snprintf(buf, PATH_MAX, "mkdir -p %s", out_redirection_path[STD_FD]);
+    snprintf(buf, PATH_MAX, "mkdir -p %s", redirection_path[STD_FD]);
     if (system(buf) != 0) {
         perror("mkdir");
         exit(EXIT_FAILURE);
     }
     for (int i = 0; i < host_count; i++) {
-        snprintf(buf, PATH_MAX, "%s/%s.%s", out_redirection_path[STD_FD], host[i], ext);
-        if ((out_redirection_fd[STD_FD][i] = open(buf, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1) {
+        snprintf(buf, PATH_MAX, "%s/%s.%s", redirection_path[STD_FD], host[i], ext);
+        if ((redirection_fd[STD_FD][i] = open(buf, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1) {
             perror("open output redirections");
             exit(EXIT_FAILURE);
         }
     }
 }
 
+void sa_sigchld_handler(int sig) {
+    int status;
+    pid_t pid;
+
+    // 중첩된 시그널 처리를 위해 loop 적용
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        if (pid <= 0) break; // 0: 자식이 있지만 아직 종료되지 않음, -1: 종료시킬 자식이 없음
+        for (int i = 0; i < host_count; i++) {
+            if (hostpid[i] == pid) {
+                fprintf(stderr, "[%s] pid %d exited with status %d (%s)\n", host[i], pid, status,
+                        WIFEXITED(status) ? "normal" : "abnormal");
+                alive--;
+                break;
+            }
+        }
+    }
+}
+
+ssize_t print_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, int redirected) {
+    int flag = 0;
+    char buf[PIPE_BUFSIZ];
+    ssize_t n = 0, total = 0;
+    while ((n = read(fd, buf, PIPE_BUFSIZ - 1)) > 0) {
+        total += n;
+        if (!flag) {
+            if (!redirected) {
+                fprintf(master_fp, "\n[%s]\n", host[host_no]);
+            }
+            flag = 1;
+        }
+        buf[n] = '\0';
+        if (!redirected) {
+            fprintf(master_fp, "%s", buf);
+        } else {
+            write(redirection_fd, buf, n);
+        }
+    }
+    if (!redirected && flag) printf("\n");
+
+    return total;
+}
+
 int main(int argc, char *argv[]) {
     char command[PIPE_BUFSIZ];
-    char *opt_redirection_path[3] = {};
-    int out_redirection_fd[3][MAX_HOST] = {};
+    char redirection_path[3][PATH_MAX] = {};
+    int redirection_fd[3][MAX_HOST] = {};
     char *env;
     int c;
 
@@ -155,10 +199,12 @@ int main(int argc, char *argv[]) {
                 get_host_from_string(optarg, " ,");
                 break;
             case 'o':
-                opt_redirection_path[STDOUT_FILENO] = optarg;
+                out_redirected = 1;
+                strncpy(redirection_path[STDOUT_FILENO], optarg, PATH_MAX);
                 break;
             case 'e':
-                opt_redirection_path[STDERR_FILENO] = optarg;
+                err_redirected = 1;
+                strncpy(redirection_path[STDERR_FILENO], optarg, PATH_MAX);
                 break;
             default:    // '?' invalid option
                 exit(EXIT_FAILURE);
@@ -177,14 +223,14 @@ int main(int argc, char *argv[]) {
     // try CLSH_HOSTFILE
     if (host_count < 1) {
         if ((env = getenv("CLSH_HOSTFILE")) != NULL) {
-            printf("Note: use `%s` from CLSH_FILEHOST environment", env);
+            printf("Note: use `%s` from CLSH_FILEHOST environment\n", env);
             get_host_from_file(env, "\n");
         }
     }
 
     // try .hostfile
     if (host_count < 1) {
-        printf("Note: use .hostfile");
+        printf("Note: use .hostfile\n");
         get_host_from_file(".hostfile", "\n");
     }
 
@@ -213,22 +259,24 @@ int main(int argc, char *argv[]) {
     assert(command != NULL);
 
     // open output file
-    if (opt_redirection_path[STDOUT_FILENO] != NULL) {
-        open_output_redirection(STDOUT_FILENO, out_redirection_fd, opt_redirection_path, "out");
+    if (out_redirected) {
+        open_redirection(STDOUT_FILENO, redirection_path, redirection_fd, "out");
     }
 
     // open error file
-    if (opt_redirection_path[STDERR_FILENO] != NULL) {
-        open_output_redirection(STDERR_FILENO, out_redirection_fd, opt_redirection_path, "err");
+    if (err_redirected) {
+        open_redirection(STDERR_FILENO, redirection_path, redirection_fd, "err");
     }
 
-    // handling child termination with sigaction
-    struct sigaction sa;
-    sa.sa_handler = SIG_IGN;
-    sa.sa_flags = SA_NOCLDWAIT;
-    sigemptyset(&sa.sa_mask);
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        perror("sigaction");
+    // signal handler
+    struct sigaction sa_sigchld;
+
+    sa_sigchld.sa_handler = sa_sigchld_handler;
+    sa_sigchld.sa_flags = SA_RESTART; // poll timeout이 끝나기 전에 SIGCHLD가 발생한 경우
+    // poll을 다시 호출할 수 있도록 SA_RESTART 설정
+    sigemptyset(&sa_sigchld.sa_mask);
+    if (sigaction(SIGCHLD, &sa_sigchld, NULL) == -1) {
+        perror("sigaction(sigchld)");
         exit(EXIT_FAILURE);
     }
 
@@ -244,10 +292,22 @@ int main(int argc, char *argv[]) {
         );
     }
 
-    // set event flags
+    // set event flags for poll
     for (int i = 0; i < host_count; i++) {
-        hostpfds[STDOUT_FILENO][i].events = POLLIN;
-        hostpfds[STDERR_FILENO][i].events = POLLIN;
+        hostpfds[STDOUT_FILENO][i].events = (POLLIN | POLLHUP);
+        hostpfds[STDERR_FILENO][i].events = (POLLIN | POLLHUP);
+    }
+
+    // set nonblock flags
+    for (int i = 0; i < host_count; i++) {
+        if (fcntl(hostpfds[STDOUT_FILENO][i].fd, F_SETFL, O_NONBLOCK) == -1) {
+            perror("fcntl");
+            exit(EXIT_FAILURE);
+        }
+        if (fcntl(hostpfds[STDERR_FILENO][i].fd, F_SETFL, O_NONBLOCK) == -1) {
+            perror("fcntl");
+            exit(EXIT_FAILURE);
+        }
     }
 
     // master stdin (option 4)
@@ -255,52 +315,76 @@ int main(int argc, char *argv[]) {
     command_fd.fd = STDIN_FILENO;
     command_fd.events = POLLIN;
 
-    int alive = host_count;
+    alive = host_count;
+    FILE *master_fps[3] = {stdin, stdout, stderr};
+    ssize_t n;
     while (alive > 0) {
-
         // poll stdout and stderr
         for (int fd_no = 1; fd_no < 3; fd_no++) {
-            if (poll(hostpfds[fd_no], (nfds_t) host_count, -1) < 0) {
-                fprintf(stderr, "Couldn't poll host stdout or stderr.\n");
-                exit(EXIT_FAILURE);
+            if (poll(hostpfds[fd_no], (nfds_t) host_count, 1) < 0) {
+                // SIGCHLD handler의 SA_RESTART에도 불구하고 poll과 같이 timeout 기능이 있는 syscall은 EINTR을 반환하는 경우가 있음
+                if (errno == EINTR) {
+                    // perror가 interrupted인 경우 SIGCHLD에 의해 poll이 중단됨
+                    // perror가 no child process인 경우 sigchld_handler의 waitpid에서 errno가 넘어온 것.
+                    // 두 경우 모두 무시 가능
+                    perror("poll or waitpid");
+                    continue;
+                }
             }
 
             for (int i = 0; i < host_count; i++) {
-                if (hostpfds[fd_no][i].revents & POLLIN) {
-                    int flag = 0;
-                    char buf[PIPE_BUFSIZ];
-                    ssize_t n;
-                    while ((n = read(hostpfds[fd_no][i].fd, buf, PIPE_BUFSIZ)) > 0) {
-                        if (!flag) {
-                            if (opt_redirection_path[fd_no] == NULL) {
-                                printf("[%s]: ", host[i]);
+                if (hostpfds[fd_no][i].revents & POLLHUP) {
+                    switch (fd_no) {
+                        case STDERR_FILENO:
+                            print_pipe(
+                                    hostpfds[STDERR_FILENO][i].fd,
+                                    redirection_fd[STDERR_FILENO][i],
+                                    master_fps[STDERR_FILENO],
+                                    i,
+                                    err_redirected
+                            );
+                            close(hostpfds[STDERR_FILENO][i].fd);
+                            hostpfds[STDERR_FILENO][i].fd = -1;
+                            if (err_redirected) {
+                                close(redirection_fd[STDERR_FILENO][i]);
                             }
-                            flag = 1;
-                        }
-                        buf[n] = '\0';
-                        write((opt_redirection_path[fd_no] == NULL ? fd_no : out_redirection_fd[fd_no][i]), buf, n);
+                            fprintf(stderr, "[%s] stderr closed\n", host[i]);
+                            break;
+                        case STDOUT_FILENO:
+                            // print all stdout first
+                            print_pipe(
+                                    hostpfds[STDOUT_FILENO][i].fd,
+                                    redirection_fd[STDOUT_FILENO][i],
+                                    master_fps[STDOUT_FILENO],
+                                    i,
+                                    out_redirected
+                            );
+                            fflush(stdout);
+                            close(hostpfds[STDOUT_FILENO][i].fd);
+                            hostpfds[STDOUT_FILENO][i].fd = -1;
+                            if (out_redirected) {
+                                close(redirection_fd[STDOUT_FILENO][i]);
+                            }
+                            fprintf(stderr, "[%s] stdout closed\n", host[i]);
+                            break;
+                        default:
+                            break;
                     }
-                    if (opt_redirection_path[fd_no] == NULL) printf("\n");
-
-                    // poll 진입 후 한 번도 읽지 못 한 경우, 자식 프로세스 상태 확인
-                    if (!flag) {
-                        if (n < 0) {
-                            strerror(errno);
-                            exit(EXIT_FAILURE);
-                        } else if (n == 0) {
-                            // 프로세스 생존 체크: kill signo 0
-                            if (kill(hostpid[i], 0) < 0) {
-//                          fprintf(stderr, "pid %d doesn't exists anymore.\n", hostpid[i]);
-                                close(hostpfds[STDOUT_FILENO][i].fd);
-                                close(hostpfds[STDERR_FILENO][i].fd);
-                                close(out_redirection_fd[STDOUT_FILENO][i]);
-                                close(out_redirection_fd[STDERR_FILENO][i]);
-                                alive--;
-                            }
-//                        else {
-//                            fprintf(stderr, "%s's stdout return EOF. (running)\n", host[i]);
-//                        }
-                        }
+                } else if (hostpfds[fd_no][i].revents & POLLIN) {
+                    n = print_pipe(
+                            hostpfds[fd_no][i].fd,
+                            redirection_fd[fd_no][i],
+                            master_fps[fd_no],
+                            i,
+                            (fd_no == STDOUT_FILENO) ? out_redirected : err_redirected
+                    );
+                    if (n < 0 && errno != EAGAIN) {
+                        perror("read");
+                        exit(EXIT_FAILURE);
+                    } else if (n == 0) {
+                        fprintf(stderr,
+                                "Note: caught [%s] POLLIN without POLLHUP but returned EOF. (maybe still in running)\n",
+                                host[i]);
                     }
                 }
             }
