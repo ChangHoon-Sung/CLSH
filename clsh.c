@@ -139,7 +139,7 @@ void open_redirection(const int STD_FD, char redirection_path[][PATH_MAX], int r
 }
 
 void sa_sigchld_handler(int sig) {
-    DEBUG_PRINT("SIGCHILD HANDLER\n");
+    DEBUG_PRINT("SIGCHLD HANDLER\n");
     int status;
     pid_t pid;
 
