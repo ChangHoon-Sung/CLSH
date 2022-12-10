@@ -8,5 +8,8 @@ all : $(TARGET)
 clsh : clsh.c
 	$(CC) $(CFLAGS) -o $@.out $^
 
+debug : clsh.c
+		$(CC) $(CFLAGS) -o $@.out $^ -DDEBUG
+
 clean :
 	rm -f $(TARGET)

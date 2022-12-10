@@ -10,6 +10,13 @@
 #include <poll.h>
 #include <signal.h>
 
+#ifdef DEBUG
+#define DEBUG_PRINT(fmt, args...) fprintf(stderr, "<DEBUG>: %s:%d:%s(): " fmt, \
+    __FILE__, __LINE__, __func__, ##args)
+#else
+#define DEBUG_PRINT(fmt, args...)  ((void)0)
+#endif
+
 #define RD 0
 #define WR 1
 
@@ -19,6 +26,7 @@
 extern int optind;
 
 char host[MAX_HOST][FILENAME_MAX];
+struct pollfd hostpfds[3][MAX_HOST];
 pid_t hostpid[MAX_HOST];
 
 int out_redirected = 0, err_redirected = 0;
@@ -58,7 +66,7 @@ pid_t ssh_proc_open(char *hostname, char *command, int *to, int *from, int *err)
         dup2(from_pipe[WR], STDOUT_FILENO);
         dup2(err_pipe[WR], STDERR_FILENO);
 
-        execlp("ssh", "ssh", hostname, command, (char *) 0);
+        execlp("ssh", "ssh", "-tt", hostname, command, (char *) 0);
 
         // Shouldn't be reached
         exit(EXIT_FAILURE);
@@ -93,7 +101,7 @@ void get_host_from_file(char *path, const char *sep) {
                 fprintf(stderr, "Too many hosts");
                 exit(EXIT_FAILURE);
             }
-            strncpy(host[host_count++], ptr, FILENAME_MAX);
+            strncpy(host[host_count++], ptr, strlen(ptr));
             ptr = strtok(NULL, sep);
         }
     }
@@ -107,7 +115,7 @@ void get_host_from_string(char *s, const char *sep) {
             fprintf(stderr, "Too many hosts");
             exit(EXIT_FAILURE);
         }
-        strncpy(host[host_count++], ptr, FILENAME_MAX);
+        strncpy(host[host_count++], ptr, strlen(ptr));
         ptr = strtok(NULL, sep);
     }
 }
@@ -138,12 +146,19 @@ void sa_sigchld_handler(int sig) {
         if (pid <= 0) break; // 0: 자식이 있지만 아직 종료되지 않음, -1: 종료시킬 자식이 없음
         for (int i = 0; i < host_count; i++) {
             if (hostpid[i] == pid) {
-                fprintf(stderr, "[%s] pid %d exited with status %d (%s)\n", host[i], pid, status,
-                        WIFEXITED(status) ? "normal" : "abnormal");
+                DEBUG_PRINT("[%s] pid %d exited with status %d (%s)\n", host[i], pid, status,
+                            WIFEXITED(status) ? "normal" : "abnormal");
                 alive--;
                 break;
             }
         }
+    }
+}
+
+void sa_sigquit_handler(int sig) {
+    char sq = 3;
+    for (int i = 0; i < host_count; i++) {
+        write(hostpfds[STDIN_FILENO][i].fd, &sq, sizeof(char));
     }
 }
 
@@ -155,7 +170,7 @@ ssize_t print_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, int
         total += n;
         if (!flag) {
             if (!redirected) {
-                fprintf(master_fp, "\n[%s]\n", host[host_no]);
+                fprintf(master_fp, "[%s]\n", host[host_no]);
             }
             flag = 1;
         }
@@ -166,7 +181,7 @@ ssize_t print_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, int
             write(redirection_fd, buf, n);
         }
     }
-    if (!redirected && flag) printf("\n");
+    if (!redirected && flag) fprintf(master_fp, "\n");
 
     return total;
 }
@@ -200,11 +215,11 @@ int main(int argc, char *argv[]) {
                 break;
             case 'o':
                 out_redirected = 1;
-                strncpy(redirection_path[STDOUT_FILENO], optarg, PATH_MAX);
+                strncpy(redirection_path[STDOUT_FILENO], optarg, strlen(optarg));
                 break;
             case 'e':
                 err_redirected = 1;
-                strncpy(redirection_path[STDERR_FILENO], optarg, PATH_MAX);
+                strncpy(redirection_path[STDERR_FILENO], optarg, strlen(optarg));
                 break;
             default:    // '?' invalid option
                 exit(EXIT_FAILURE);
@@ -241,7 +256,7 @@ int main(int argc, char *argv[]) {
 
     // make command (shell redirection)
     if (isatty(STDIN_FILENO)) {
-        strncpy(command, argv[optind], PIPE_BUFSIZ);
+        strncpy(command, argv[optind], strlen(argv[optind]));
     } else {
         char buf[PIPE_BUFSIZ];
         ssize_t n;
@@ -269,19 +284,33 @@ int main(int argc, char *argv[]) {
     }
 
     // signal handler
-    struct sigaction sa_sigchld;
+    struct sigaction sa_sigchld, sa_sigterm, sa_sigquit;
 
     sa_sigchld.sa_handler = sa_sigchld_handler;
-    sa_sigchld.sa_flags = SA_RESTART; // poll timeout이 끝나기 전에 SIGCHLD가 발생한 경우
-    // poll을 다시 호출할 수 있도록 SA_RESTART 설정
+    sa_sigchld.sa_flags = SA_RESTART;   // poll timeout이 끝나기 전에 SIGCHLD가 발생한 경우 poll을 다시 호출할 수 있도록 SA_RESTART 설정
     sigemptyset(&sa_sigchld.sa_mask);
     if (sigaction(SIGCHLD, &sa_sigchld, NULL) == -1) {
         perror("sigaction(sigchld)");
         exit(EXIT_FAILURE);
     }
 
+    sa_sigterm.sa_handler = SIG_IGN;    // 자식이 하던 일을 마칠 수 있도록 전파 방지 및 무시
+    sa_sigterm.sa_flags = 0;
+    sigemptyset(&sa_sigterm.sa_mask);
+    if (sigaction(SIGTERM, &sa_sigterm, NULL) == -1) {
+        perror("sigaction(sigterm)");
+        exit(EXIT_FAILURE);
+    }
+
+    sa_sigquit.sa_handler = sa_sigquit_handler;
+    sa_sigquit.sa_flags = 0;
+    sigemptyset(&sa_sigquit.sa_mask);
+    if (sigaction(SIGQUIT, &sa_sigquit, NULL) == -1) {
+        perror("sigaction(sigquit)");
+        exit(EXIT_FAILURE);
+    }
+
     // remote exec with ssh
-    struct pollfd hostpfds[3][MAX_HOST];
     for (int i = 0; i < host_count; i++) {
         hostpid[i] = ssh_proc_open(
                 host[i],
@@ -327,7 +356,9 @@ int main(int argc, char *argv[]) {
                     // perror가 interrupted인 경우 SIGCHLD에 의해 poll이 중단됨
                     // perror가 no child process인 경우 sigchld_handler의 waitpid에서 errno가 넘어온 것.
                     // 두 경우 모두 무시 가능
-                    perror("poll or waitpid");
+#ifdef DEBUG
+                    perror("<DEBUG>: poll or waitpid");
+#endif
                     continue;
                 }
             }
@@ -348,7 +379,7 @@ int main(int argc, char *argv[]) {
                             if (err_redirected) {
                                 close(redirection_fd[STDERR_FILENO][i]);
                             }
-                            fprintf(stderr, "[%s] stderr closed\n", host[i]);
+                            DEBUG_PRINT("[%s] stderr closed\n", host[i]);
                             break;
                         case STDOUT_FILENO:
                             // print all stdout first
@@ -365,7 +396,7 @@ int main(int argc, char *argv[]) {
                             if (out_redirected) {
                                 close(redirection_fd[STDOUT_FILENO][i]);
                             }
-                            fprintf(stderr, "[%s] stdout closed\n", host[i]);
+                            DEBUG_PRINT("[%s] stdout closed\n", host[i]);
                             break;
                         default:
                             break;
@@ -382,7 +413,7 @@ int main(int argc, char *argv[]) {
                         perror("read");
                         exit(EXIT_FAILURE);
                     } else if (n == 0) {
-                        fprintf(stderr,
+                        DEBUG_PRINT(
                                 "Note: caught [%s] POLLIN without POLLHUP but returned EOF. (maybe still in running)\n",
                                 host[i]);
                     }
