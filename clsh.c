@@ -330,12 +330,12 @@ int main(int argc, char *argv[]) {
 
     // debconf frontend configuration
     DEBUG_PRINT("Origin CMD (argv[optind]) : %s\n", argv[optind]);
-    if (strncmp(argv[optind], "sudo", 4) == 0) {
+    if (strncmp(argv[optind], "sudo", 4) == 0 && strstr(argv[optind], "apt") != NULL) {
         DEBUG_PRINT("sudo detected\n");
         snprintf(command, PIPE_BUFSIZ, "sudo DEBIAN_FRONTEND=readline %s", argv[optind] + 5);
     } else {
         DEBUG_PRINT("sudo not detected\n");
-        snprintf(command, PIPE_BUFSIZ, "DEBIAN_FRONTEND=readline %s", argv[optind]);
+        snprintf(command, PIPE_BUFSIZ, "%s", argv[optind]);
     }
     DEBUG_PRINT("CMD: %s\n", command);
 
