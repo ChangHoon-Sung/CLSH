@@ -341,14 +341,15 @@ int main(int argc, char *argv[]) {
 
     // shell redirection
     if (!isatty(STDIN_FILENO)) {
-        char buf[PIPE_BUFSIZ];
+        char buf[PIPE_BUFSIZ], temp[PIPE_BUFSIZ];
         ssize_t n;
         if ((n = read(STDIN_FILENO, buf, PIPE_BUFSIZ - 1)) < 0) {
             perror("read stdin");
             exit(EXIT_FAILURE);
         }
         buf[n - 1] = '\0';    // remove last newline
-        snprintf(command, PIPE_BUFSIZ, "echo \"%s\" | %s", buf, command);
+        snprintf(temp, PIPE_BUFSIZ, "echo \"%s\" | %s", buf, command);
+        strncpy(command, temp, strlen(temp));
     }
 
     // assertion
