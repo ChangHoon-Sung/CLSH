@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <regex.h>
 
 #ifdef DEBUG
 #define DEBUG_PRINT(fmt, args...) fprintf(stderr, "<DEBUG>: %s:%d:%s(): " fmt, \
@@ -33,6 +34,9 @@ int host_count;
 int out_redirected = 0, err_redirected = 0;
 
 volatile sig_atomic_t alive;    // signal 내부에서 쓰기 수행
+
+regex_t input_req_re;
+static const char *Q_PATTERN = "[:?][ \n\t\r\f]*$";
 
 pid_t ssh_proc_open(char *hostname, char *command, int *to, int *from, int *err) {
     int to_pipe[2], from_pipe[2], err_pipe[2];
@@ -162,7 +166,9 @@ void sa_sigchld_handler(int sig) {
 
 void sa_sigquit_handler(int sig) {
     DEBUG_PRINT("SIGQUIT HANDLER\n");
-    char sq = 3;
+
+    // 원격지 프로세스 종료를 위한 pty 시그널 키 전송
+    char sq = 0x1c;     // ctrl + \ (SIGQUIT)
     for (int i = 0; i < host_count; i++) {
         if (hostpfds[STDIN_FILENO][i].fd != -1) {
             if (write(hostpfds[STDIN_FILENO][i].fd, &sq, sizeof(char)) < 0) {
@@ -170,9 +176,11 @@ void sa_sigquit_handler(int sig) {
             }
         }
     }
+
+    // 아직 종료되지 않은 자식 프로세스 시그널 전파 시도
     for (int i = 0; i < host_count; i++) {
         if (hostpid[i] != -1) {
-            if (kill(hostpid[i], SIGINT) == -1) {
+            if (kill(hostpid[i], SIGQUIT) == -1) {
                 DEBUG_PRINT("kill : %s\n", strerror(errno));
             }
         }
@@ -209,6 +217,40 @@ ssize_t consume_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, i
         } else {
             write(redirection_fd, buf, n);
         }
+
+        // naive input pattern matching
+        if ((strstr(buf, "Current password:") != NULL ||
+             strstr(buf, "[Y/n]") != NULL ||
+             strstr(buf, "[y/N]") != NULL ||
+             strstr(buf, "y/n") != NULL ||
+             strstr(buf, "yes/no") != NULL ||
+             strstr(buf, "ENTER") != NULL ||
+             strstr(buf, "Geographic area: ") != NULL ||
+             strstr(buf, "Time zone: ") != NULL ||
+             (regexec(&input_req_re, buf, 0, NULL, 0) == 0))) {
+
+            fprintf(master_fp, "[%s] > ", host[host_no]);
+            fflush(master_fp);
+
+            // ssh open 성공 시 stdin은 항상 사용 가능하다고 가정함
+            // ssh pseudo-terminal에 key stroke 직접 전송
+            // 시그널 등으로 인해 alive 자식 프로세스가 없으면 탈출
+            char input;
+            while (alive > 0) {
+                if (read(STDIN_FILENO, &input, sizeof(char)) < 0) {
+                    DEBUG_PRINT("read: %s\n", strerror(errno));
+                    if (alive && errno == EINTR)
+                        continue;    // read 대기 중 interrupt 발생 시 재시도
+                }
+                if (alive && write(hostpfds[STDIN_FILENO][host_no].fd, &input, sizeof(char)) < 0) {
+                    DEBUG_PRINT("write : %s\n", strerror(errno));
+                }
+                if (input == '\n') {
+                    DEBUG_PRINT("break input loop (newline found)");
+                    break;
+                }
+            }
+        }
     }
     if (!redirected && flag) fprintf(master_fp, "\n");
 
@@ -216,6 +258,9 @@ ssize_t consume_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, i
 }
 
 int main(int argc, char *argv[]) {
+    // unbuffered stdin
+    setvbuf(stdin, NULL, _IONBF, 0);
+
     char command[PIPE_BUFSIZ];
     char redirection_path[3][PATH_MAX] = {};
     int redirection_fd[3][MAX_HOST] = {};
@@ -283,10 +328,19 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    // make command (shell redirection)
-    if (isatty(STDIN_FILENO)) {
-        strncpy(command, argv[optind], strlen(argv[optind]));
+    // debconf frontend configuration
+    DEBUG_PRINT("Origin CMD (argv[optind]) : %s\n", argv[optind]);
+    if (strncmp(argv[optind], "sudo", 4) == 0) {
+        DEBUG_PRINT("sudo detected\n");
+        snprintf(command, PIPE_BUFSIZ, "sudo DEBIAN_FRONTEND=readline %s", argv[optind] + 5);
     } else {
+        DEBUG_PRINT("sudo not detected\n");
+        snprintf(command, PIPE_BUFSIZ, "DEBIAN_FRONTEND=readline %s", argv[optind]);
+    }
+    DEBUG_PRINT("CMD: %s\n", command);
+
+    // shell redirection
+    if (!isatty(STDIN_FILENO)) {
         char buf[PIPE_BUFSIZ];
         ssize_t n;
         if ((n = read(STDIN_FILENO, buf, PIPE_BUFSIZ - 1)) < 0) {
@@ -294,7 +348,7 @@ int main(int argc, char *argv[]) {
             exit(EXIT_FAILURE);
         }
         buf[n - 1] = '\0';    // remove last newline
-        snprintf(command, PIPE_BUFSIZ, "echo \"%s\" | %s", buf, argv[optind]);
+        snprintf(command, PIPE_BUFSIZ, "echo \"%s\" | %s", buf, command);
     }
 
     // assertion
@@ -313,7 +367,7 @@ int main(int argc, char *argv[]) {
     }
 
     // signal handler
-    struct sigaction sa_sigchld, sa_sigterm, sa_sigquit;
+    struct sigaction sa_sigchld, sa_sigterm, sa_sigquit, sa_sigpipe;
 
     sa_sigchld.sa_handler = sa_sigchld_handler;
     sa_sigchld.sa_flags = SA_NOCLDSTOP;     // 자식의 STOP/CONT가 아닌, 종료에만 관심이 있음
@@ -339,6 +393,14 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    sa_sigpipe.sa_handler = SIG_IGN;
+    sa_sigpipe.sa_flags = 0;
+    sigemptyset(&sa_sigpipe.sa_mask);
+    if (sigaction(SIGPIPE, &sa_sigpipe, NULL) == -1) {
+        perror("sigaction(sigpipe)");
+        exit(EXIT_FAILURE);
+    }
+
     // remote exec with ssh
     for (int i = 0; i < host_count; i++) {
         hostpid[i] = ssh_proc_open(
@@ -360,25 +422,25 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < host_count; i++) {
         if (fcntl(hostpfds[STDOUT_FILENO][i].fd, F_SETFL, O_NONBLOCK) == -1) {
             perror("fcntl");
-            exit(EXIT_FAILURE);
+            raise(SIGQUIT);
         }
         if (fcntl(hostpfds[STDERR_FILENO][i].fd, F_SETFL, O_NONBLOCK) == -1) {
             perror("fcntl");
-            exit(EXIT_FAILURE);
+            raise(SIGQUIT);
         }
     }
 
-    // master stdin (option 4)
-    struct pollfd command_fd;
-    command_fd.fd = STDIN_FILENO;
-    command_fd.events = POLLIN;
+    // compile regex (option 4)
+    if (regcomp(&input_req_re, Q_PATTERN, REG_EXTENDED) != 0) {
+        perror("regcomp");
+        exit(EXIT_FAILURE);
+    }
 
     alive = host_count;
     FILE *master_fps[3] = {stdin, stdout, stderr};
     ssize_t n;
     while (alive > 0) {
-        DEBUG_PRINT("alive(%d) loop\n", alive);
-        // poll stdout and stderr
+//        DEBUG_PRINT("alive(%d) loop\n", alive);
         for (int fd_no = 1; fd_no < 3; fd_no++) {
             if (poll(hostpfds[fd_no], (nfds_t) host_count, 100) < 0) {
                 // SIGCHLD handler의 SA_RESTART에도 불구하고 poll과 같이 timeout 기능이 있는 syscall은 EINTR을 반환하는 경우가 있음
@@ -450,5 +512,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    regfree(&input_req_re);
     exit(EXIT_SUCCESS);
 }
