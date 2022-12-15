@@ -167,15 +167,15 @@ void sa_sigchld_handler(int sig) {
 void sa_sigquit_handler(int sig) {
     DEBUG_PRINT("SIGQUIT HANDLER\n");
 
-    // 원격지 프로세스 종료를 위한 pty 시그널 키 전송
-    char sq = 0x1c;     // ctrl + \ (SIGQUIT)
-    for (int i = 0; i < host_count; i++) {
-        if (hostpfds[STDIN_FILENO][i].fd != -1) {
-            if (write(hostpfds[STDIN_FILENO][i].fd, &sq, sizeof(char)) < 0) {
-                DEBUG_PRINT("write : %s\n", strerror(errno));
-            }
-        }
-    }
+//    // 원격지 프로세스 종료를 위한 pty 시그널 키 전송
+//    char sq = 0x1c;     // ctrl + \ (SIGQUIT)
+//    for (int i = 0; i < host_count; i++) {
+//        if (hostpfds[STDIN_FILENO][i].fd != -1) {
+//            if (write(hostpfds[STDIN_FILENO][i].fd, &sq, sizeof(char)) < 0) {
+//                DEBUG_PRINT("write : %s\n", strerror(errno));
+//            }
+//        }
+//    }
 
     // 아직 종료되지 않은 자식 프로세스 시그널 전파 시도
     for (int i = 0; i < host_count; i++) {
@@ -208,7 +208,7 @@ ssize_t consume_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, i
             strstr(buf, "refused") != NULL) {
             fprintf(stderr, "[%s]: Connection Error Detected!\n", host[host_no]);
             hostpfds[STDIN_FILENO][host_no].fd = -1;
-            sa_sigquit_handler(SIGQUIT);
+            raise(SIGQUIT);
             return total;
         }
 
@@ -366,6 +366,17 @@ int main(int argc, char *argv[]) {
         open_redirection(STDERR_FILENO, redirection_path, redirection_fd, "err");
     }
 
+    // remote exec with ssh
+    for (int i = 0; i < host_count; i++) {
+        hostpid[i] = ssh_proc_open(
+                host[i],
+                command,
+                &hostpfds[STDIN_FILENO][i].fd,
+                &hostpfds[STDOUT_FILENO][i].fd,
+                &hostpfds[STDERR_FILENO][i].fd
+        );
+    }
+
     // signal handler
     struct sigaction sa_sigchld, sa_sigterm, sa_sigquit, sa_sigpipe;
 
@@ -399,17 +410,6 @@ int main(int argc, char *argv[]) {
     if (sigaction(SIGPIPE, &sa_sigpipe, NULL) == -1) {
         perror("sigaction(sigpipe)");
         exit(EXIT_FAILURE);
-    }
-
-    // remote exec with ssh
-    for (int i = 0; i < host_count; i++) {
-        hostpid[i] = ssh_proc_open(
-                host[i],
-                command,
-                &hostpfds[STDIN_FILENO][i].fd,
-                &hostpfds[STDOUT_FILENO][i].fd,
-                &hostpfds[STDERR_FILENO][i].fd
-        );
     }
 
     // set event flags for poll
