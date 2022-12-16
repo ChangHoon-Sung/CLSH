@@ -143,7 +143,7 @@ void open_redirection(const int STD_FD, char redirection_path[][PATH_MAX], int r
 }
 
 void sa_sigchld_handler(int sig) {
-    DEBUG_PRINT("SIGCHLD HANDLER\n");
+    DEBUG_PRINT("%s HANDLER\n", strsignal(sig));
     int status;
     pid_t pid;
 
@@ -165,7 +165,7 @@ void sa_sigchld_handler(int sig) {
 }
 
 void sa_sigquit_handler(int sig) {
-    DEBUG_PRINT("SIGQUIT HANDLER\n");
+    DEBUG_PRINT("%s HANDLER\n", strsignal(sig));
 
 //    // 원격지 프로세스 종료를 위한 pty 시그널 키 전송
 //    char sq = 0x1c;     // ctrl + \ (SIGQUIT)
@@ -261,7 +261,6 @@ int main(int argc, char *argv[]) {
     // unbuffered stdin
     setvbuf(stdin, NULL, _IONBF, 0);
 
-    char command[PIPE_BUFSIZ];
     char redirection_path[3][PATH_MAX] = {};
     int redirection_fd[3][MAX_HOST] = {};
     char *env;
@@ -323,25 +322,48 @@ int main(int argc, char *argv[]) {
         get_host_from_file(".hostfile", "\n");
     }
 
-    if (host_count < 1) {
-        printf("usage: ./clsh --hostfile <path> <command>\n");
+    if (host_count < 1 || optind >= argc) {
+        printf("Usage: clsh [-h=host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
+
+        printf("Options:\n");
+        printf("\t-h\t\t comma separated host list\n");
+        printf("\t-f,--hostfile\t hostfile path. each line is a host.\n");
+        printf("\t-o,--out\t directory that stdout will be redirected.\n");
+        printf("\t-e,--err\t directory that stderr will be redirected.\n");
+        printf("\n");
+        printf("Environment:\n");
+        printf("\tCLSH_HOSTS\t comma separated host list\n");
+        printf("\tCLSH_HOSTFILE\t hostfile path\n");
+
         exit(EXIT_FAILURE);
+    }
+
+    // make command
+    char raw_command[PIPE_BUFSIZ] = {};
+    char command[PIPE_BUFSIZ];
+    char buf[PIPE_BUFSIZ];
+
+
+    // get command from args
+    for (int i = optind; i < argc; i++) {
+        strcat(raw_command, argv[i]);
+        strcat(raw_command, " ");
     }
 
     // debconf frontend configuration
     DEBUG_PRINT("Origin CMD (argv[optind]) : %s\n", argv[optind]);
-    if (strncmp(argv[optind], "sudo", 4) == 0 && strstr(argv[optind], "apt") != NULL) {
+    if (strncmp(raw_command, "sudo", 4) == 0 && strstr(raw_command, "apt") != NULL) {
         DEBUG_PRINT("sudo detected\n");
-        snprintf(command, PIPE_BUFSIZ, "sudo DEBIAN_FRONTEND=readline %s", argv[optind] + 5);
+        snprintf(command, PIPE_BUFSIZ, "sudo DEBIAN_FRONTEND=readline %s", raw_command + 5);
     } else {
         DEBUG_PRINT("sudo not detected\n");
-        snprintf(command, PIPE_BUFSIZ, "%s", argv[optind]);
+        snprintf(command, PIPE_BUFSIZ, "%s", raw_command);
     }
     DEBUG_PRINT("CMD: %s\n", command);
 
     // shell redirection
     if (!isatty(STDIN_FILENO)) {
-        char buf[PIPE_BUFSIZ], temp[PIPE_BUFSIZ];
+        char temp[PIPE_BUFSIZ];
         ssize_t n;
         if ((n = read(STDIN_FILENO, buf, PIPE_BUFSIZ - 1)) < 0) {
             perror("read stdin");
@@ -350,6 +372,7 @@ int main(int argc, char *argv[]) {
         buf[n - 1] = '\0';    // remove last newline
         snprintf(temp, PIPE_BUFSIZ, "echo \"%s\" | %s", buf, command);
         strncpy(command, temp, strlen(temp));
+        DEBUG_PRINT("SHELL REDIRECTED CMD: %s\n", command);
     }
 
     // assertion
