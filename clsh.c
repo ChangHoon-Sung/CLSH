@@ -38,6 +38,21 @@ volatile sig_atomic_t alive;    // signal 내부에서 쓰기 수행
 regex_t input_req_re;
 static const char *Q_PATTERN = "[:?][ \n\t\r\f]*$";
 
+
+void print_man(void) {
+    printf("Usage: clsh [-h host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
+
+    printf("Options:\n");
+    printf("\t-h\t\t comma separated host list\n");
+    printf("\t-f,--hostfile\t hostfile path. each line is a host.\n");
+    printf("\t-o,--out\t directory that stdout will be redirected.\n");
+    printf("\t-e,--err\t directory that stderr will be redirected.\n");
+    printf("\n");
+    printf("Environment:\n");
+    printf("\tCLSH_HOSTS\t comma separated host list\n");
+    printf("\tCLSH_HOSTFILE\t hostfile path\n");
+}
+
 pid_t ssh_proc_open(char *hostname, char *command, int *to, int *from, int *err) {
     int to_pipe[2], from_pipe[2], err_pipe[2];
     pid_t pid;
@@ -93,6 +108,7 @@ void get_host_from_file(char *path, const char *sep) {
     int fd = open(path, O_RDONLY);
     if (fd == -1) {
         perror("open hostfile");
+        print_man();
         exit(EXIT_FAILURE);
     }
 
@@ -323,18 +339,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (host_count < 1 || optind >= argc) {
-        printf("Usage: clsh [-h host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
-
-        printf("Options:\n");
-        printf("\t-h\t\t comma separated host list\n");
-        printf("\t-f,--hostfile\t hostfile path. each line is a host.\n");
-        printf("\t-o,--out\t directory that stdout will be redirected.\n");
-        printf("\t-e,--err\t directory that stderr will be redirected.\n");
-        printf("\n");
-        printf("Environment:\n");
-        printf("\tCLSH_HOSTS\t comma separated host list\n");
-        printf("\tCLSH_HOSTFILE\t hostfile path\n");
-
+        print_man();
         exit(EXIT_FAILURE);
     }
 
