@@ -323,7 +323,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (host_count < 1 || optind >= argc) {
-        printf("Usage: clsh [-h=host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
+        printf("Usage: clsh [-h host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
 
         printf("Options:\n");
         printf("\t-h\t\t comma separated host list\n");
@@ -352,7 +352,8 @@ int main(int argc, char *argv[]) {
 
     // debconf frontend configuration
     DEBUG_PRINT("Origin CMD (argv[optind]) : %s\n", argv[optind]);
-    if (strncmp(raw_command, "sudo", 4) == 0 && strstr(raw_command, "apt") != NULL) {
+    if (strncmp(raw_command, "sudo", 4) == 0 &&
+        (strstr(raw_command, "apt") != NULL || strstr(raw_command, "dpkg") != NULL)) {
         DEBUG_PRINT("sudo detected\n");
         snprintf(command, PIPE_BUFSIZ, "sudo DEBIAN_FRONTEND=readline %s", raw_command + 5);
     } else {
