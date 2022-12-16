@@ -33,6 +33,8 @@ int host_count;
 
 int out_redirected = 0, err_redirected = 0;
 
+int interactive = 0;
+
 volatile sig_atomic_t alive;    // signal 내부에서 쓰기 수행
 
 regex_t input_req_re;
@@ -40,9 +42,10 @@ static const char *Q_PATTERN = "[:?][ \n\t\r\f]*$";
 
 
 void print_man(void) {
-    printf("Usage: clsh [-h host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
+    printf("Usage: clsh [-i] [-h host1,host2,...] [--hostfile=hostfile] [--out=out_directory] [--err=err_directory] command\n\n");
 
     printf("Options:\n");
+    printf("\t-i\t\t activate interactive mode\n");
     printf("\t-h\t\t comma separated host list\n");
     printf("\t-f,--hostfile\t hostfile path. each line is a host.\n");
     printf("\t-o,--out\t directory that stdout will be redirected.\n");
@@ -235,15 +238,15 @@ ssize_t consume_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, i
         }
 
         // naive input pattern matching
-        if ((strstr(buf, "Current password:") != NULL ||
-             strstr(buf, "[Y/n]") != NULL ||
-             strstr(buf, "[y/N]") != NULL ||
-             strstr(buf, "y/n") != NULL ||
-             strstr(buf, "yes/no") != NULL ||
-             strstr(buf, "ENTER") != NULL ||
-             strstr(buf, "Geographic area: ") != NULL ||
-             strstr(buf, "Time zone: ") != NULL ||
-             (regexec(&input_req_re, buf, 0, NULL, 0) == 0))) {
+        if (interactive && (strstr(buf, "Current password:") != NULL ||
+                            strstr(buf, "[Y/n]") != NULL ||
+                            strstr(buf, "[y/N]") != NULL ||
+                            strstr(buf, "y/n") != NULL ||
+                            strstr(buf, "yes/no") != NULL ||
+                            strstr(buf, "ENTER") != NULL ||
+                            strstr(buf, "Geographic area: ") != NULL ||
+                            strstr(buf, "Time zone: ") != NULL ||
+                            (regexec(&input_req_re, buf, 0, NULL, 0) == 0))) {
 
             fprintf(master_fp, "[%s] > ", host[host_no]);
             fflush(master_fp);
@@ -262,7 +265,7 @@ ssize_t consume_pipe(int fd, int redirection_fd, FILE *master_fp, int host_no, i
                     DEBUG_PRINT("write : %s\n", strerror(errno));
                 }
                 if (input == '\n') {
-                    DEBUG_PRINT("break input loop (newline found)");
+                    DEBUG_PRINT("break input loop (newline found)\n");
                     break;
                 }
             }
@@ -291,11 +294,14 @@ int main(int argc, char *argv[]) {
                 {"err",      required_argument, NULL, 'e'},
         };
 
-        c = getopt_long(argc, argv, "h:f:o:e:", long_options, &option_index);
+        c = getopt_long(argc, argv, "h:f:o:e:i", long_options, &option_index);
         if (c == -1)
             break;
 
         switch (c) {
+            case 'i':
+                interactive = 1;
+                break;
             case 'f':
                 get_host_from_file(optarg, "\n");
                 break;
